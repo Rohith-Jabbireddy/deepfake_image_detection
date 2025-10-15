@@ -1,280 +1,283 @@
 import streamlit as st
-import sqlite3
-import cv2
 import numpy as np
-import joblib
 from PIL import Image
-from datetime import datetime
-import hashlib
-import io
-import os
+import joblib
+import gdown
 from pathlib import Path
-import requests
+import cv2
 import plotly.graph_objects as go
 
-# =========================================================
-# ✅ Safe Google Drive Download + Model Load
-# =========================================================
+# For Google Drive upload
+from pydrive2.auth import GoogleAuth
+from pydrive2.drive import GoogleDrive
+
+# -------------------------------
+# 🌍 PAGE CONFIG
+# -------------------------------
+st.set_page_config(
+    page_title="DeepFake Detective",
+    page_icon="🧠",
+    layout="wide",
+)
+
+# -------------------------------
+# 🎨 STYLES & SMOOTH SCROLL
+# -------------------------------
+st.markdown("""
+    <style>
+    html, body, [data-testid="stAppViewContainer"] {
+        scroll-behavior: smooth;
+        background: radial-gradient(circle at top left, #0f0c29, #302b63, #24243e);
+        color: white;
+    }
+    .main-title {
+        text-align: center;
+        font-size: 3rem;
+        color: #8B5CF6;
+        font-weight: bold;
+    }
+    .sub-title {
+        text-align: center;
+        color: #BBB;
+        font-size: 1.2rem;
+        margin-bottom: 3rem;
+    }
+    .card {
+        background-color: #1F1B2E;
+        border-radius: 15px;
+        padding: 2rem;
+        transition: transform .3s ease, box-shadow .3s ease;
+        box-shadow: 0 0 15px rgba(139, 92, 246, 0.4);
+        text-align: center;
+    }
+    .card:hover {
+        transform: translateY(-6px);
+        box-shadow: 0 0 25px rgba(139, 92, 246, 0.6);
+    }
+    .nav-btn {
+        background-color: #1F1B2E;
+        border-radius: 10px;
+        padding: 10px 20px;
+        margin: 5px;
+        cursor: pointer;
+        font-weight: 600;
+        color: #8B5CF6;
+        border: 1px solid #8B5CF6;
+        text-decoration: none;
+    }
+    .nav-btn:hover {
+        background-color: #8B5CF6;
+        color: white;
+    }
+    ::-webkit-scrollbar {
+        width: 8px;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: linear-gradient(#8B5CF6, #9333EA);
+        border-radius: 4px;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# -------------------------------
+# 🧭 NAVIGATION BAR
+# -------------------------------
+st.markdown("""
+    <div style="display: flex; justify-content: center; gap: 10px; margin-bottom: 40px;">
+        <a href='/?page=Home' class='nav-btn'>🏠 Home</a>
+        <a href='/?page=Detect' class='nav-btn'>🔍 Detect</a>
+        <a href='/?page=About' class='nav-btn'>📘 About</a>
+        <a href='/?page=Contact' class='nav-btn'>📞 Contact</a>
+    </div>
+""", unsafe_allow_html=True)
+
+# -------------------------------
+# 🌐 PAGE ROUTING (using st.query_params)
+# -------------------------------
+params = st.query_params
+page = params.get("page", ["Home"])[0]
+
+# -------------------------------
+# 🧩 LOAD MODEL
+# -------------------------------
 @st.cache_resource
 def load_model():
     model_path = Path("deepfake_hybrid_model.pkl")
     file_id = "19TiXL0SSQViZy_fD_2TKA1t-6HRitzjc"
-    URL = "https://drive.google.com/uc?export=download"
-
+    url = f"https://drive.google.com/uc?id={file_id}"
     if not model_path.exists():
         with st.spinner("📥 Downloading model from Google Drive..."):
-            session = requests.Session()
-            response = session.get(URL, params={'id': file_id}, stream=True)
-            token = None
-
-            # 🔹 Look for confirm token in cookies (Google Drive protection)
-            for key, value in response.cookies.items():
-                if key.startswith("download_warning"):
-                    token = value
-
-            if token:
-                response = session.get(URL, params={'id': file_id, 'confirm': token}, stream=True)
-
-            # 🔹 Stream download to prevent memory issues
-            with open(model_path, "wb") as f:
-                for chunk in response.iter_content(32768):
-                    if chunk:
-                        f.write(chunk)
-
+            gdown.download(url, str(model_path), quiet=False)
     try:
         model = joblib.load(model_path)
-        st.success("✅ Model loaded successfully!")
         return model
     except Exception as e:
         st.error(f"❌ Failed to load model: {e}")
-        st.warning("The downloaded file might be corrupted. Make sure the Google Drive file is public.")
-        if model_path.exists():
-            model_path.unlink()  # Delete corrupted file
+        st.warning("Make sure the Google Drive file is public.")
         st.stop()
 
-model = load_model()
+# -------------------------------
+# 🔐 CONNECT TO GOOGLE DRIVE
+# -------------------------------
+@st.cache_resource
+def connect_drive():
+    gauth = GoogleAuth()
+    # try load saved credentials
+    gauth.LoadCredentialsFile("token.json")
+    if gauth.credentials is None:
+        gauth.LocalWebserverAuth()
+    elif gauth.access_token_expired:
+        gauth.Refresh()
+    else:
+        gauth.Authorize()
+    gauth.SaveCredentialsFile("token.json")
+    drive = GoogleDrive(gauth)
+    return drive
 
-# =========================================================
-# Database setup
-# =========================================================
-def init_db():
-    conn = sqlite3.connect('deepfake_users.db')
-    c = conn.cursor()
+# The target folder ID (from your shared link)
+TARGET_DRIVE_FOLDER_ID = "1GJoX7tNDSfxLaYY24d7sBJwGBorpwq-4"
 
-    c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT, email TEXT)''')
-
-    c.execute('''CREATE TABLE IF NOT EXISTS predictions 
-                 (id INTEGER PRIMARY KEY, user_id INTEGER, timestamp TEXT, 
-                 filename TEXT, result REAL, heatmap BLOB,
-                 FOREIGN KEY(user_id) REFERENCES users(id))''')
-
-    conn.commit()
-    conn.close()
-
-# =========================================================
-# Utility functions
-# =========================================================
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-
-def preprocess_image(image, target_size=(128, 128)):
-    img_array = np.array(image)
-    img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-    resized = cv2.resize(img_bgr, target_size)
-    normalized = resized.astype("float32") / 255.0
-    heatmap = cv2.applyColorMap(np.uint8(255 * normalized.mean(axis=2)), cv2.COLORMAP_JET)
-    return np.expand_dims(normalized, axis=0), heatmap
-
-# =========================================================
-# App UI
-# =========================================================
-def main():
-    init_db()
-    st.set_page_config(page_title="Deepfake Detector", page_icon="🕵️", layout="wide")
-
-    # Gradient background
+# -------------------------------
+# 🏠 HOME PAGE
+# -------------------------------
+if page == "Home":
+    st.markdown("<h1 class='main-title'>🧠 DeepFake Detective</h1>", unsafe_allow_html=True)
+    st.markdown("<p class='sub-title'>Harness the power of AI to detect DeepFakes in real-time</p>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("<div class='card'><h3>⚡ Real-Time Analysis</h3><p>Get instant AI results.</p></div>", unsafe_allow_html=True)
+    with c2:
+        st.markdown("<div class='card'><h3>🎯 High Accuracy</h3><p>Industry-level detection.</p></div>", unsafe_allow_html=True)
+    with c3:
+        st.markdown("<div class='card'><h3>🔒 Privacy First</h3><p>Your data stays local.</p></div>", unsafe_allow_html=True)
+    st.divider()
+    st.markdown("## 🔍 How It Works")
     st.markdown("""
-        <style>
-        [data-testid="stAppViewContainer"] {
-            background: linear-gradient(120deg, #141E30, #243B55);
-            color: white;
-        }
-        .main-title {
-            text-align: center;
-            font-size: 3rem;
-            font-weight: bold;
-            color: #00BFFF;
-            text-shadow: 0px 0px 20px rgba(0,191,255,0.6);
-        }
-        .sub-title {
-            text-align: center;
-            font-size: 1.2rem;
-            color: #B0C4DE;
-            margin-bottom: 2rem;
-        }
-        .card {
-            background: rgba(255,255,255,0.1);
-            border-radius: 15px;
-            padding: 2rem;
-            box-shadow: 0 0 15px rgba(0,191,255,0.2);
-        }
-        .footer {
-            text-align: center;
-            color: #B0C4DE;
-            margin-top: 3rem;
-            font-size: 0.9rem;
-        }
-        </style>
-    """, unsafe_allow_html=True)
+    1️⃣ **Upload Image**  
+    2️⃣ **AI Analysis**  
+    3️⃣ **Heatmap Overlay & Confidence**  
+    4️⃣ **Results Stored on Drive**
+    """)
 
-    st.markdown("<h1 class='main-title'>🕵️ Deepfake Detection System</h1>", unsafe_allow_html=True)
-    st.markdown("<p class='sub-title'>Detect manipulated or AI-generated images in seconds</p>", unsafe_allow_html=True)
+# -------------------------------
+# 🔍 DETECTION PAGE
+# -------------------------------
+elif page == "Detect":
+    st.title("🔍 DeepFake Detector")
+    st.markdown("Upload an image to check if it's **Real or AI-generated**.")
 
-    if 'logged_in' not in st.session_state:
-        st.session_state.logged_in = False
-        st.session_state.user_id = None
-        st.session_state.page = "Login"
+    model = load_model()
+    drive = connect_drive()
 
-    # =========================================================
-    # LOGIN / SIGNUP
-    # =========================================================
-    if st.session_state.page == "Login" and not st.session_state.logged_in:
-        with st.container():
-            st.markdown("### 🔐 Login to Continue")
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            col1, col2 = st.columns(2)
-            if col1.button("Login"):
-                conn = sqlite3.connect('deepfake_users.db')
-                c = conn.cursor()
-                c.execute("SELECT id, password FROM users WHERE username=?", (username,))
-                result = c.fetchone()
-                conn.close()
-                if result and result[1] == hash_password(password):
-                    st.session_state.logged_in = True
-                    st.session_state.user_id = result[0]
-                    st.session_state.page = "Detector"
-                    st.success("Welcome back! Redirecting...")
-                    st.rerun()
-                else:
-                    st.error("Invalid credentials")
+    uploaded_file = st.file_uploader("Upload Image", type=["jpg", "jpeg", "png"])
+    if uploaded_file:
+        image = Image.open(uploaded_file).convert("RGB")
+        st.image(image, caption="🖼️ Uploaded Image", use_container_width=True)
 
-            if col2.button("Create Account"):
-                st.session_state.page = "Signup"
-                st.rerun()
+        # Preprocess
+        img_resized = image.resize((128, 128))
+        arr = np.array(img_resized) / 255.0
+        arr = np.expand_dims(arr, axis=0)
 
-    elif st.session_state.page == "Signup" and not st.session_state.logged_in:
-        with st.container():
-            st.markdown("### 🧾 Create Account")
-            username = st.text_input("Choose Username")
-            email = st.text_input("Email")
-            password = st.text_input("Password", type="password")
-            if st.button("Sign Up"):
-                conn = sqlite3.connect('deepfake_users.db')
-                c = conn.cursor()
-                try:
-                    c.execute("INSERT INTO users (username, password, email) VALUES (?, ?, ?)",
-                              (username, hash_password(password), email))
-                    conn.commit()
-                    st.success("✅ Account created! Please login.")
-                    st.session_state.page = "Login"
-                except sqlite3.IntegrityError:
-                    st.error("Username already exists")
-                conn.close()
+        with st.spinner("🧠 AI is analyzing the image..."):
+            prediction = model.predict(arr)
+            confidence = float(np.max(prediction)) * 100
+            predicted_label = np.argmax(prediction, axis=1)[0] if prediction.shape[1] > 1 else int(prediction[0] > 0.5)
 
-    # =========================================================
-    # DETECTOR PAGE
-    # =========================================================
-    elif st.session_state.page == "Detector" and st.session_state.logged_in:
-        st.markdown("### 🔍 Upload Image for Deepfake Analysis")
-        uploaded_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"])
+            # Generate heatmap overlay
+            gray = cv2.cvtColor(np.array(img_resized), cv2.COLOR_RGB2GRAY)
+            norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+            heatmap = cv2.applyColorMap(norm, cv2.COLORMAP_PLASMA)
+            blended = cv2.addWeighted(np.array(img_resized), 0.6, heatmap, 0.4, 0)
 
-        if uploaded_file:
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Uploaded Image", use_container_width=True)
+            # Display results
+            c1, c2 = st.columns(2)
+            with c1:
+                label_text = "🟢 Real Image" if predicted_label == 0 else "🔴 DeepFake Detected"
+                st.markdown(f"## {label_text}")
+                st.markdown(f"**Confidence:** {confidence:.2f}%")
+            with c2:
+                st.image(blended, caption="🔥 AI Heatmap Overlay", use_container_width=True)
 
-            if st.button("🚀 Analyze Image"):
-                with st.spinner("Analyzing... Please wait."):
-                    image_data, heatmap = preprocess_image(image)
-                    prediction = model.predict(image_data)[0].item()
+            # Confidence gauge
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=confidence,
+                title={'text': "Confidence Level (%)"},
+                gauge={
+                    'axis': {'range': [0, 100]},
+                    'bar': {'color': "#8B5CF6"},
+                    'steps': [
+                        {'range': [0, 50], 'color': "#1E293B"},
+                        {'range': [50, 100], 'color': "#9333EA"},
+                    ],
+                }
+            ))
+            st.plotly_chart(fig, use_container_width=True)
 
-                    status = "⚠️ Deepfake Detected" if prediction >= 0.55 else "✅ Real Image"
-                    color = "#FF6347" if prediction >= 0.55 else "#00BFFF"
+        # -------------------------------
+        # Save and upload files to Drive
+        # -------------------------------
+        try:
+            save_dir = Path("analysis_uploads")
+            save_dir.mkdir(exist_ok=True)
+        except Exception:
+            pass
 
-                    st.markdown(f"<div class='card'><h3 style='color:{color}'>{status}</h3>"
-                                f"<p>Confidence: {prediction:.2%}</p></div>", unsafe_allow_html=True)
-                    st.image(heatmap, caption="Detection Heatmap", width=300)
+        # Save original upload
+        local_img_path = save_dir / uploaded_file.name
+        image.save(local_img_path)
 
-                    # Gauge visualization
-                    fig = go.Figure(go.Indicator(
-                        mode="gauge+number",
-                        value=prediction * 100,
-                        gauge={
-                            'axis': {'range': [0, 100]},
-                            'bar': {'color': color},
-                            'steps': [
-                                {'range': [0, 55], 'color': '#00BFFF'},
-                                {'range': [55, 100], 'color': '#FF6347'}
-                            ]
-                        }
-                    ))
-                    st.plotly_chart(fig, use_container_width=True)
+        # Save heatmap overlay (convert BGR->RGB for PIL)
+        heatmap_img = Image.fromarray(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB))
+        heatmap_name = f"heatmap_{uploaded_file.name}"
+        local_heatmap_path = save_dir / heatmap_name
+        heatmap_img.save(local_heatmap_path)
 
-                    # Save to DB
-                    conn = sqlite3.connect('deepfake_users.db')
-                    c = conn.cursor()
-                    heatmap_bytes = cv2.imencode('.png', heatmap)[1].tobytes()
-                    c.execute("INSERT INTO predictions (user_id, timestamp, filename, result, heatmap) VALUES (?, ?, ?, ?, ?)",
-                              (st.session_state.user_id, datetime.now().isoformat(), uploaded_file.name, prediction, heatmap_bytes))
-                    conn.commit()
-                    conn.close()
+        with st.spinner("☁️ Uploading to Google Drive..."):
+            # original image
+            file1 = drive.CreateFile({"title": uploaded_file.name,
+                                      "parents": [{"id": TARGET_DRIVE_FOLDER_ID}]})
+            file1.SetContentFile(str(local_img_path))
+            file1.Upload()
+            # heatmap file
+            file2 = drive.CreateFile({"title": heatmap_name,
+                                      "parents": [{"id": TARGET_DRIVE_FOLDER_ID}]})
+            file2.SetContentFile(str(local_heatmap_path))
+            file2.Upload()
+        st.success("✅ Uploaded files to Google Drive folder")
 
-        if st.button("📜 View History"):
-            st.session_state.page = "History"
-            st.rerun()
-
-        if st.button("🚪 Logout"):
-            st.session_state.logged_in = False
-            st.session_state.page = "Login"
-            st.rerun()
-
-    # =========================================================
-    # HISTORY PAGE
-    # =========================================================
-    elif st.session_state.page == "History" and st.session_state.logged_in:
-        st.markdown("### 📜 Analysis History")
-        conn = sqlite3.connect('deepfake_users.db')
-        c = conn.cursor()
-        c.execute("SELECT timestamp, filename, result, heatmap FROM predictions WHERE user_id=? ORDER BY timestamp DESC",
-                  (st.session_state.user_id,))
-        records = c.fetchall()
-        conn.close()
-
-        if not records:
-            st.info("No analysis history yet.")
-        else:
-            for ts, fname, result, heatmap_bytes in records:
-                status = "Deepfake" if result >= 0.55 else "Real"
-                color = "#FF6347" if result >= 0.55 else "#00BFFF"
-                with st.expander(f"{fname} - {status} ({result:.2%})"):
-                    st.write(f"🕒 {ts}")
-                    heatmap = cv2.imdecode(np.frombuffer(heatmap_bytes, np.uint8), cv2.IMREAD_COLOR)
-                    st.image(heatmap, caption="Detection Heatmap", width=250)
-
-        if st.button("⬅️ Back to Detector"):
-            st.session_state.page = "Detector"
-            st.rerun()
-
-    # =========================================================
-    # FOOTER
-    # =========================================================
+# -------------------------------
+# 📘 ABOUT PAGE
+# -------------------------------
+elif page == "About":
+    st.title("📘 About DeepFake Detective")
     st.markdown("""
-        <div class='footer'>
-            <p>© 2025 Deepfake Detector — Created by Rohith Jabbireddy</p>
-            <p>📧 rohithjabbireddy@gmail.com | 📞 63049 43737</p>
-        </div>
-    """, unsafe_allow_html=True)
+    DeepFake Detective uses a CNN to analyze images and highlight suspicious areas.
 
-if __name__ == "__main__":
-    main()
+    **Features**  
+    - Heatmap overlay  
+    - Confidence score  
+    - Automatic upload of results to your Google Drive  
+
+    **Tech Stack**  
+    - TensorFlow / Keras  
+    - OpenCV, NumPy  
+    - Streamlit  
+    - PyDrive2 for Drive uploads  
+    - Plotly for gauge  
+    """)
+    st.markdown("Built with ❤️ by **J Rohith Kumar Reddy**")
+
+# -------------------------------
+# 📞 CONTACT PAGE
+# -------------------------------
+elif page == "Contact":
+    st.title("📞 Contact")
+    st.markdown("""
+    Got questions or collaboration ideas? Reach out:
+
+    - 📧 Email: rohithjabbireddy@gmail.com  
+    - 📱 Phone: +91 63049 43737  
+    - LinkedIn: [linkedin.com/in/rohith-jabbireddy](https://www.linkedin.com/in/rohith-jabbireddy)
+    """)
