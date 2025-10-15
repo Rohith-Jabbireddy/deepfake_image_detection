@@ -13,32 +13,43 @@ import requests
 import plotly.graph_objects as go
 
 # =========================================================
-# ✅ Download model safely from Google Drive
+# ✅ Safe Google Drive Download + Model Load
 # =========================================================
 @st.cache_resource
 def load_model():
     model_path = Path("deepfake_hybrid_model.pkl")
     file_id = "19TiXL0SSQViZy_fD_2TKA1t-6HRitzjc"
-    download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    URL = "https://drive.google.com/uc?export=download"
 
     if not model_path.exists():
         with st.spinner("📥 Downloading model from Google Drive..."):
-            response = requests.get(download_url, stream=True)
-            if response.status_code != 200:
-                st.error(f"Download failed with status {response.status_code}")
-                st.stop()
+            session = requests.Session()
+            response = session.get(URL, params={'id': file_id}, stream=True)
+            token = None
 
+            # 🔹 Look for confirm token in cookies (Google Drive protection)
+            for key, value in response.cookies.items():
+                if key.startswith("download_warning"):
+                    token = value
+
+            if token:
+                response = session.get(URL, params={'id': file_id, 'confirm': token}, stream=True)
+
+            # 🔹 Stream download to prevent memory issues
             with open(model_path, "wb") as f:
-                for chunk in response.iter_content(1024 * 1024):
-                    f.write(chunk)
+                for chunk in response.iter_content(32768):
+                    if chunk:
+                        f.write(chunk)
 
     try:
         model = joblib.load(model_path)
+        st.success("✅ Model loaded successfully!")
         return model
     except Exception as e:
         st.error(f"❌ Failed to load model: {e}")
+        st.warning("The downloaded file might be corrupted. Make sure the Google Drive file is public.")
         if model_path.exists():
-            model_path.unlink()
+            model_path.unlink()  # Delete corrupted file
         st.stop()
 
 model = load_model()
