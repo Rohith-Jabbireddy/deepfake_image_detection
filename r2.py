@@ -11,7 +11,7 @@ import io
 import plotly.graph_objects as go
 import os
 from pathlib import Path
-import gdown   # ✅ Added for Google Drive download
+import requests   # ✅ replaced gdown
 
 # =========================================================
 # STEP 2: Download model from Google Drive if not present
@@ -21,13 +21,21 @@ def load_model():
     model_path = Path("deepfake_hybrid_model.pkl")
     if not model_path.exists():
         with st.spinner("📥 Downloading model from Google Drive..."):
-            # 🔹 Replace YOUR_FILE_ID with your actual file ID from Google Drive
-            url = "https://drive.google.com/uc?id=YOUR_FILE_ID"
-            gdown.download(url, str(model_path), quiet=False)
+            FILE_ID = "19TiXL0SSQViZy_fD_2TKA1t-6HRitzjc"
+            URL = f"https://drive.google.com/uc?export=download&id={FILE_ID}"
+            response = requests.get(URL, allow_redirects=True)
+            if response.status_code == 200:
+                with open(model_path, "wb") as f:
+                    f.write(response.content)
+                st.success("✅ Model downloaded successfully!")
+            else:
+                st.error(f"Failed to download model. HTTP Status: {response.status_code}")
+                st.stop()
     return joblib.load(model_path)
 
 model = load_model()
 # =========================================================
+
 
 # Database initialization with schema check
 def init_db():
